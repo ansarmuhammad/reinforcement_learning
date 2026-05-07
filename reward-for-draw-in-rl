@@ -1,0 +1,263 @@
+
+import random
+import math
+from collections import defaultdict
+from functools import lru_cache
+
+# =====================================
+# PARAMETERS
+# =====================================
+ALPHA = 0.3
+GAMMA = 0.95
+EPSILON_START = 0.4
+EPSILON_END = 0.05
+EPISODES_VS_RANDOM = 200_000
+EPISODES_VS_MINIMAX = 300_000
+
+# =====================================
+# STATE UTILITIES
+# =====================================
+def empty_board():
+    return tuple([0] * 9)
+
+def get_available_actions(state):
+    return [i for i, v in enumerate(state) if v == 0]
+
+def apply_action(state, action, player):
+    s = list(state)
+    s[action] = player
+    return tuple(s)
+
+# =====================================
+# GAME LOGIC
+# =====================================
+def check_winner(state):
+    lines = [(0,1,2),(3,4,5),(6,7,8),
+             (0,3,6),(1,4,7),(2,5,8),
+             (0,4,8),(2,4,6)]
+    for a,b,c in lines:
+        if state[a] != 0 and state[a] == state[b] == state[c]:
+            return state[a]
+    return 0
+
+def is_draw(state):
+    return 0 not in state
+
+# =====================================
+# STRATEGIC HELPERS
+# =====================================
+def find_winning_move(state, player):
+    for a in get_available_actions(state):
+        if check_winner(apply_action(state, a, player)) == player:
+            return a
+    return None
+
+def find_blocking_move(state, player):
+    opponent = -player
+    for a in get_available_actions(state):
+        if check_winner(apply_action(state, a, opponent)) == opponent:
+            return a
+    return None
+
+# =====================================
+# Q TABLE
+# =====================================
+Q = defaultdict(lambda: defaultdict(float))
+
+# =====================================
+# RL POLICY
+# =====================================
+def choose_action_rl(state, epsilon=0.0):
+    # Always take the win
+    move = find_winning_move(state, 1)
+    if move is not None:
+        return move
+
+    # Always block opponent's win
+    move = find_blocking_move(state, 1)
+    if move is not None:
+        return move
+
+    actions = get_available_actions(state)
+
+    if random.random() < epsilon:
+        return random.choice(actions)
+
+    max_q = max(Q[state][a] for a in actions)
+    best = [a for a in actions if Q[state][a] == max_q]
+    return random.choice(best)
+
+# =====================================
+# MINIMAX WITH MEMOIZATION (fast!)
+# =====================================
+@lru_cache(maxsize=None)
+def minimax(state, player):
+    winner = check_winner(state)
+    if winner == 1:
+        return 1
+    elif winner == -1:
+        return -1
+    elif is_draw(state):
+        return 0
+
+    actions = get_available_actions(state)
+
+    if player == -1:
+        return min(minimax(apply_action(state, a, -1), 1) for a in actions)
+    else:
+        return max(minimax(apply_action(state, a, 1), -1) for a in actions)
+
+def choose_action_minimax(state, player):
+    actions = get_available_actions(state)
+
+    if player == -1:
+        best_value = math.inf
+        best_action = None
+        for a in actions:
+            val = minimax(apply_action(state, a, -1), 1)
+            if val < best_value:
+                best_value = val
+                best_action = a
+        return best_action
+    else:
+        best_value = -math.inf
+        best_action = None
+        for a in actions:
+            val = minimax(apply_action(state, a, 1), -1)
+            if val > best_value:
+                best_value = val
+                best_action = a
+        return best_action
+
+# =====================================
+# REWARD SHAPING
+# Draw vs minimax is success — reward it!
+# =====================================
+def get_reward(winner):
+    if winner == 1:
+        return 1.0
+    elif winner == -1:
+        return -1.0
+    else:
+        return 0.5  # draw is the best achievable outcome vs perfect play
+
+def propagate_rewards(history, final_reward):
+    reward = final_reward
+    for s, a, p in reversed(history):
+        if p == 1:
+            Q[s][a] += ALPHA * (reward - Q[s][a])
+            reward *= GAMMA
+
+# =====================================
+# PHASE 1: TRAIN VS RANDOM
+# Learns basic tactics cheaply
+# =====================================
+def train_vs_random():
+    episodes = EPISODES_VS_RANDOM
+    for ep in range(episodes):
+        epsilon = EPSILON_START - (EPSILON_START - EPSILON_END) * (ep / episodes)
+        state = empty_board()
+        player = 1 if ep % 2 == 0 else -1
+        history = []
+
+        while True:
+            if player == 1:
+                action = choose_action_rl(state, epsilon)
+            else:
+                action = random.choice(get_available_actions(state))
+
+            history.append((state, action, player))
+            state = apply_action(state, action, player)
+
+            winner = check_winner(state)
+            if winner != 0:
+                propagate_rewards(history, get_reward(winner))
+                break
+            if is_draw(state):
+                propagate_rewards(history, get_reward(0))
+                break
+
+            player *= -1
+
+    print(f"Phase 1 complete: {episodes:,} episodes vs random")
+
+# =====================================
+# PHASE 2: TRAIN VS MINIMAX
+# Learns minimax's actual patterns — the critical phase
+# =====================================
+def train_vs_minimax():
+    episodes = EPISODES_VS_MINIMAX
+    for ep in range(episodes):
+        epsilon = max(EPSILON_END, EPSILON_START * (1 - ep / episodes))
+        state = empty_board()
+        player = 1 if ep % 2 == 0 else -1
+        history = []
+
+        while True:
+            if player == 1:
+                action = choose_action_rl(state, epsilon)
+            else:
+                action = choose_action_minimax(state, -1)
+
+            history.append((state, action, player))
+            state = apply_action(state, action, player)
+
+            winner = check_winner(state)
+            if winner != 0:
+                propagate_rewards(history, get_reward(winner))
+                break
+            if is_draw(state):
+                # Draws now get a positive reward — RL learns to aim for them
+                propagate_rewards(history, get_reward(0))
+                break
+
+            player *= -1
+
+    print(f"Phase 2 complete: {episodes:,} episodes vs minimax")
+
+# =====================================
+# EVALUATE (greedy, no learning)
+# =====================================
+def run_matches(n=100):
+    rl_wins = 0
+    minimax_wins = 0
+    draws = 0
+
+    for i in range(n):
+        state = empty_board()
+        player = 1 if i % 2 == 0 else -1
+
+        while True:
+            if player == 1:
+                action = choose_action_rl(state, epsilon=0.0)  # greedy
+            else:
+                action = choose_action_minimax(state, -1)
+
+            state = apply_action(state, action, player)
+            winner = check_winner(state)
+
+            if winner == 1:
+                rl_wins += 1
+                break
+            elif winner == -1:
+                minimax_wins += 1
+                break
+            elif is_draw(state):
+                draws += 1
+                break
+
+            player *= -1
+
+    print(f"\n=== RESULTS ({n} Games) ===")
+    print(f"RL Wins:      {rl_wins}")
+    print(f"Minimax Wins: {minimax_wins}")
+    print(f"Draws:        {draws}")
+    print(f"Draw rate:    {draws/n*100:.0f}%")
+
+# =====================================
+# RUN
+# =====================================
+if __name__ == "__main__":
+    train_vs_random()
+    train_vs_minimax()
+    run_matches(100)
